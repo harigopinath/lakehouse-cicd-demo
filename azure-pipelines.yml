@@ -1,0 +1,540 @@
+# Python package
+# Create and test a Python package on multiple Python versions.
+# Add steps that analyze code, save the dist with the build record, publish to a PyPI-compatible index, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/python
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - release
+  paths:
+    exclude:
+      - README.md
+
+pool:
+  vmImage: ubuntu-latest
+
+parameters:
+  - name: databricksWorkspaceUrl
+    displayName: 'Azure Databricks Workspace Url'
+    type: string
+    default: $(databricksWorkspaceUrl)
+
+  - name: accessToken
+    displayName: 'Azure Databricks Access Token (AAD or PAT)'
+    type: string
+    default: $(accessToken)
+
+  - name: databricksCliProfile
+    displayName: 'Databricks CLI profile name'
+    type: string
+    default: DEFAULT
+
+  - name: notebooksBaseLocation
+    displayName: 'Base Location of notebooks'
+    type: string
+    default: '$(System.DefaultWorkingDirectory)/notebooks'
+
+  - name: notebooksStagingFolder
+    displayName: 'Databricks notebooks staging folder'
+    type: string
+    default: '/Shared/Lakehouse/Staging'
+
+  - name: notebooksProductionFolder
+    displayName: 'Databricks notebooks production folder'
+    type: string
+    default: '/Shared/Lakehouse/Production'
+
+  - name: lakehouseStagingFolder
+    displayName: 'DBFS folder for Staging libs and data'
+    type: string
+    default: '/lakehouseFolder/Staging'
+
+  - name: lakehouseProductionFolder
+    displayName: 'DBFS folder for Production libs and data'
+    type: string
+    default: '/lakehouseFolder/Production'
+
+  - name: lakehouseStagingDatabase
+    displayName: 'Staging database name'
+    type: string
+    default: 'lakehouse_demo_staging'
+
+  - name: lakehouseProductionDatabase
+    displayName: 'Production database name'
+    type: string
+    default: 'lakehouse_demo_production'
+
+  - name: lakehouseVersion
+    displayName: 'Version of all libraries'
+    type: string
+    default: '0.2.0'
+
+
+stages:
+  - stage: stagingDeployment
+    displayName: 'Deploy in Staging'
+    variables:
+      libsFileName: 'lakehouseLibs-${{ parameters.lakehouseVersion }}-py3-none-any.whl'
+      pipelinesFileName: 'lakehousePipelines-${{ parameters.lakehouseVersion }}-py3-none-any.whl'
+    jobs:
+      - job: 'unittests'
+        displayName: 'Run unittests'
+        steps:
+          - checkout: self
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.8'
+            displayName: 'Use Python 3.8'
+
+          - script: |
+              cd libs
+              python3 -m pip install --upgrade pip
+              pip3 install -r requirements.txt
+            displayName: 'Install dependencies'
+
+          - script: |
+              cd libs
+              pytest --doctest-modules --junitxml=junit/test-results.xml --cov=. --cov-report=xml
+            displayName: 'Run unittests'
+
+          - task: PublishTestResults@2
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFiles: '**/test-*.xml'
+              testRunTitle: 'Publish test results for Lakehouse libs'
+              failTaskOnFailedTests: true
+              publishRunAttachments: true
+
+          - task: PublishCodeCoverageResults@1
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: '$(System.DefaultWorkingDirectory)/**/coverage.xml'
+
+      - deployment: 'deployLibs'
+        displayName: 'Build and deploy libs'
+        dependsOn: 'unittests'
+        environment: 'Staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - script: |
+                    pip3 install wheel setuptools
+                    cd "$(System.DefaultWorkingDirectory)/libs"
+                    python3 setup.py bdist_wheel
+                  displayName: 'Build the wheel'
+                  env:
+                    LAKEHOUSE_VERSION: ${{ parameters.lakehouseVersion }}
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/copy_to_dbfs.sh'
+                    arguments: '"$(System.DefaultWorkingDirectory)/libs/dist/$(libsFileName)"
+                                "dbfs:${{ parameters.lakehouseStagingFolder }}/libs"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Upload the wheel to DBFS'
+
+      - deployment: 'deployPipelines'
+        displayName: 'Build and deploy pipelines'
+        dependsOn: 'unittests'
+        environment: 'Staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - script: |
+                    pip3 install wheel setuptools
+                    cd "$(System.DefaultWorkingDirectory)/pipelines"
+                    python3 setup.py bdist_wheel
+                  displayName: 'Build the wheel'
+                  env:
+                    LAKEHOUSE_VERSION: ${{ parameters.lakehouseVersion }}
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/copy_to_dbfs.sh'
+                    arguments: '"$(System.DefaultWorkingDirectory)/pipelines/dist/$(pipelinesFileName)"
+                                "dbfs:${{ parameters.lakehouseStagingFolder }}/libs"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Upload the wheel to DBFS'
+
+      - deployment: 'deployNotebooks'
+        displayName: 'Deploy notebooks'
+        dependsOn: 'deployPipelines'
+        environment: 'Staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - bash: |
+                    export LC_ALL=C.UTF-8
+                    export LANG=C.UTF-8
+                    echo "Running: databricks --profile ${DATABRICKS_CLI_PROFILE} workspace import_dir -o -e ${NOTEBOOKS_SRC} ${NOTEBOOKS_DEST}"
+                    databricks --profile ${DATABRICKS_CLI_PROFILE} workspace import_dir -o -e ${NOTEBOOKS_SRC} ${NOTEBOOKS_DEST}
+                  env:
+                    DATABRICKS_CLI_PROFILE: ${{ parameters.databricksCliProfile }}
+                    NOTEBOOKS_SRC: ${{ parameters.notebooksBaseLocation }}
+                    NOTEBOOKS_DEST: ${{ parameters.notebooksStagingFolder }}
+                  displayName: 'Deploy the notebooks to Staging'
+
+      - deployment: 'deployTests'
+        displayName: 'Deploy integration tests'
+        dependsOn: 'deployPipelines'
+        environment: 'Staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/copy_to_dbfs.sh'
+                    arguments: '"$(System.DefaultWorkingDirectory)/pipelines/tests"
+                                "dbfs:${{ parameters.lakehouseStagingFolder }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Upload the tests to DBFS'
+
+      - deployment: 'deployPipelineJob'
+        displayName: 'Deploy the pipeline job'
+        dependsOn: 'deployNotebooks'
+        environment: 'Staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/create_pipeline_job.sh'
+                    arguments: '"${{ parameters.lakehouseStagingFolder }}/data"
+                                "${{ parameters.notebooksStagingFolder }}"
+                                "${{ parameters.lakehouseProductionFolder }}/libs"
+                                "${{ parameters.lakehouseVersion }}"
+                                "${{ parameters.lakehouseStagingDatabase }}"
+                                "${{ parameters.lakehouseStagingDatabase }}_job"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Deploy the pipeline job'
+
+
+  - stage: stagingTests
+    displayName: 'Run integration tests'
+    dependsOn: stagingDeployment
+    variables:
+      libsFileName: 'lakehouseLibs-${{ parameters.lakehouseVersion }}-py3-none-any.whl'
+      pipelinesFileName: 'lakehousePipelines-${{ parameters.lakehouseVersion }}-py3-none-any.whl'
+    jobs:
+      - job: 'notebookTests'
+        displayName: 'Run notebook tests'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.8'
+            displayName: 'Use Python 3.8'
+
+          - task: Bash@3
+            inputs:
+              targetType: 'filePath'
+              filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+              arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                            "${{ parameters.accessToken }}"
+                            "${{ parameters.databricksCliProfile }}"'
+            displayName: 'Set up the Databricks CLI'
+
+          - bash: |
+              _response=$(databricks runs submit --json '{
+                                           "run_name": "Lakehouse notebook integration tests ${{ parameters.lakehouseVersion }}",
+                                           "new_cluster": {
+                                             "num_workers": 1,
+                                             "node_type_id": "Standard_F4s_v2",
+                                             "spark_version": "9.1.x-scala2.12"
+                                           },
+                                           "libraries": [
+                                             {
+                                               "whl": "dbfs:${{ parameters.lakehouseStagingFolder }}/libs/$(libsFileName)"
+                                             },
+                                             {
+                                               "whl": "dbfs:${{ parameters.lakehouseStagingFolder }}/libs/$(pipelinesFileName)"
+                                             }              
+                                           ],
+                                           "notebook_task": {
+                                             "notebook_path": "${{ parameters.notebooksStagingFolder }}/tests/integration/test_world-bank-bronze",
+                                             "base_parameters": {
+                                               "BasePath": "/tmp/alexandru-lakehouse-tests",
+                                               "DatabaseName": "alexandru_lakehouse_tests"
+                                             }
+                                           },
+                                           "format": "SINGLE_TASK"
+                                           }'
+              )
+              run_id=$(echo "${_response}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["run_id"])' 2> /dev/null)
+                [ -z "${run_id}" ] && { echo "${_response}"; exit 1; }
+              echo "##vso[task.setvariable variable=notebookRunId;issecret=false]${run_id}"
+            env:
+              DATABRICKS_CLI_PROFILE: ${{ parameters.databricksCliProfile }}
+              NOTEBOOKS_SRC: ${{ parameters.notebooksBaseLocation }}
+              NOTEBOOKS_DEST: ${{ parameters.notebooksStagingFolder }}
+            displayName: 'Start notebook tests job'
+
+          - task: PythonScript@0
+            displayName: 'Wait for job to complete'
+            inputs:
+              scriptSource: 'filePath'
+              scriptPath: '$(System.DefaultWorkingDirectory)/scripts/wait_for_job_run.py'
+              arguments: '"${{ parameters.databricksWorkspaceUrl }}" "${{ parameters.accessToken }}" "$(notebookRunId)"'
+
+      - job: 'pyTests'
+        displayName: 'Run python tests'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.8'
+            displayName: 'Use Python 3.8'
+
+          - task: Bash@3
+            inputs:
+              targetType: 'filePath'
+              filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+              arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                            "${{ parameters.accessToken }}"
+                            "${{ parameters.databricksCliProfile }}"'
+            displayName: 'Set up the Databricks CLI'
+
+          - bash: |
+              _response=$(databricks runs submit --json '{
+                                           "run_name": "Lakehouse python integration tests ${{ parameters.lakehouseVersion }}",
+                                           "new_cluster": {
+                                             "num_workers": 1,
+                                             "node_type_id": "Standard_F4s_v2",
+                                             "spark_version": "9.1.x-scala2.12"
+                                           },
+                                           "libraries": [
+                                             {
+                                               "pypi": {"package": "pytest"}
+                                             },
+                                             {
+                                               "whl": "dbfs:${{ parameters.lakehouseStagingFolder }}/libs/$(libsFileName)"
+                                             },
+                                             {
+                                               "whl": "dbfs:${{ parameters.lakehouseStagingFolder }}/libs/$(pipelinesFileName)"
+                                             }              
+                                           ],
+                                           "spark_python_task": {
+                                             "python_file": "'dbfs:${{ parameters.lakehouseStagingFolder }}/tests/run_all_tests.py'",
+                                             "parameters": ["--testPath", "'/dbfs/${{ parameters.lakehouseStagingFolder }}/tests'"]
+                                           },
+                                           "format": "SINGLE_TASK"
+                                           }'
+              )              
+              run_id=$(echo "${_response}" | python3 -c 'import sys,json; print(json.load(sys.stdin)["run_id"])' 2> /dev/null)
+                [ -z "${run_id}" ] && { echo "${_response}"; exit 1; }
+              echo "##vso[task.setvariable variable=notebookRunId;issecret=false]${run_id}"
+            env:
+              DATABRICKS_CLI_PROFILE: ${{ parameters.databricksCliProfile }}
+              NOTEBOOKS_SRC: ${{ parameters.notebooksBaseLocation }}
+              NOTEBOOKS_DEST: ${{ parameters.notebooksStagingFolder }}
+            displayName: 'Start integration tests job'
+
+          - task: PythonScript@0
+            displayName: 'Wait for job to complete'
+            inputs:
+              scriptSource: 'filePath'
+              scriptPath: '$(System.DefaultWorkingDirectory)/scripts/wait_for_job_run.py'
+              arguments: '"${{ parameters.databricksWorkspaceUrl }}" "${{ parameters.accessToken }}" "$(notebookRunId)"'
+
+
+  - stage: productionDeployment
+    displayName: 'Deploy in Production'
+    dependsOn: stagingTests
+    jobs:
+      - deployment: 'deployLibs'
+        displayName: 'Deploy libs and pipelines'
+        environment: 'Production'
+        variables:
+          libsFileName: 'lakehouseLibs-${{ parameters.lakehouseVersion }}-py3-none-any.whl'
+          pipelinesFileName: 'lakehousePipelines-${{ parameters.lakehouseVersion }}-py3-none-any.whl'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - bash: |
+                    databricks --profile "${DATABRICKS_CLI_PROFILE}" fs cp --overwrite "dbfs:${{ parameters.lakehouseStagingFolder }}/libs/$(libsFileName)" "/tmp/$(libsFileName)"
+                    databricks --profile "${DATABRICKS_CLI_PROFILE}" fs cp --overwrite "dbfs:${{ parameters.lakehouseStagingFolder }}/libs/$(pipelinesFileName)" "/tmp/$(pipelinesFileName)"
+
+                    databricks --profile "${DATABRICKS_CLI_PROFILE}" fs cp --overwrite "/tmp/$(libsFileName)" "dbfs:${{ parameters.lakehouseProductionFolder }}/libs/$(libsFileName)"
+                    databricks --profile "${DATABRICKS_CLI_PROFILE}" fs cp --overwrite "/tmp/$(pipelinesFileName)" "dbfs:${{ parameters.lakehouseProductionFolder }}/libs/$(pipelinesFileName)"
+                  env:
+                    DATABRICKS_CLI_PROFILE: ${{ parameters.databricksCliProfile }}
+                  displayName: 'Upload the wheel to DBFS'
+
+      - deployment: 'deployNotebooks'
+        displayName: 'Deploy notebooks'
+        dependsOn: deployLibs
+        environment: 'Production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - bash: |
+                    export LC_ALL=C.UTF-8
+                    export LANG=C.UTF-8
+                    echo "Running: databricks --profile ${DATABRICKS_CLI_PROFILE} workspace import_dir -o -e ${NOTEBOOKS_SRC} ${NOTEBOOKS_DEST}"
+                    databricks --profile ${DATABRICKS_CLI_PROFILE} workspace import_dir -o -e ${NOTEBOOKS_SRC} ${NOTEBOOKS_DEST}
+                  env:
+                    DATABRICKS_CLI_PROFILE: ${{ parameters.databricksCliProfile }}
+                    NOTEBOOKS_SRC: ${{ parameters.notebooksBaseLocation }}
+                    NOTEBOOKS_DEST: ${{ parameters.notebooksProductionFolder }}
+                  displayName: 'Deploy the notebooks to production'
+
+      - deployment: 'deployPipelineJob'
+        displayName: 'Deploy the pipeline job'
+        dependsOn: 'deployNotebooks'
+        environment: 'Production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: UsePythonVersion@0
+                  inputs:
+                    versionSpec: '3.8'
+                  displayName: 'Use Python 3.8'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/configure_databricks_cli.sh'
+                    arguments: '"${{ parameters.databricksWorkspaceUrl }}"
+                                "${{ parameters.accessToken }}"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Set up the Databricks CLI'
+
+                - task: Bash@3
+                  inputs:
+                    targetType: 'filePath'
+                    filePath: '$(System.DefaultWorkingDirectory)/scripts/create_pipeline_job.sh'
+                    arguments: '"${{ parameters.lakehouseProductionFolder }}/data"
+                                "${{ parameters.notebooksProductionFolder }}"
+                                "${{ parameters.lakehouseProductionFolder }}/libs"
+                                "${{ parameters.lakehouseVersion }}"
+                                "${{ parameters.lakehouseProductionDatabase }}"
+                                "${{ parameters.lakehouseProductionDatabase }}_job"
+                                "${{ parameters.databricksCliProfile }}"'
+                  displayName: 'Deploy the pipeline job'

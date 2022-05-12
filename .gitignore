@@ -1,0 +1,22 @@
+# ignore the pycharm project folder
+.idea
+
+# python build artifacts
+*.egg-info
+
+# compiled python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# others
+*coverage.xml
+*test-output.xml
+*spark-warehouse
+.coverage
+.pytest*
+*htmlcov
+*junit
+*build
+*dist
+/libs/build/
