@@ -4,6 +4,10 @@
 
 # COMMAND ----------
 
+print("hello")
+
+# COMMAND ----------
+
 landing_base_path       = f"{base_path.rstrip('/')}/health-data-source"
 pipeline_base_path      = f"{base_path.rstrip('/')}/classic/life-expectancy"
 
@@ -48,6 +52,8 @@ all_indicators_gold_table_path      = f"{gold_tables_base_path}/all_indicators.d
 # MAGIC ##### Database
 
 # COMMAND ----------
+
+spark.sql(f"CREATE DATABASE IF NOT EXISTS {database_name}")
 
 spark.sql(f"USE {database_name}")
 

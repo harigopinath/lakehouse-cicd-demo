@@ -12,8 +12,8 @@
 # COMMAND ----------
 
 #dbutils.widgets.removeAll()
-dbutils.widgets.text("BasePath", "/tmp/alexandru-lakehouse", "Base path of all data")
-dbutils.widgets.text("DatabaseName", "alexandru_lakehouse_classic", "Name of the database")
+dbutils.widgets.text("BasePath", "/tmp/hari-lakehouse", "Base path of all data")
+dbutils.widgets.text("DatabaseName", "hari_lakehouse_classic", "Name of the database")
 
 # COMMAND ----------
 

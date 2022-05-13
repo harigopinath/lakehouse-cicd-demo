@@ -6,8 +6,8 @@
 
 #dbutils.widgets.removeAll()
 dbutils.widgets.dropdown("clean_up", "no", ["yes", "no"], "Delete all existing data")
-dbutils.widgets.text("BasePath", "/tmp/alexandru-lakehouse", "Base path of all data")
-dbutils.widgets.text("DatabaseName", "alexandru_lakehouse_classic", "Name of the database")
+dbutils.widgets.text("BasePath", "/tmp/hari-lakehouse", "Base path of all data")
+dbutils.widgets.text("DatabaseName", "hari_lakehouse_classic", "Name of the database")
 
 # COMMAND ----------
 
@@ -93,4 +93,5 @@ dbutils.notebook.run("./02-overdoses-silver", 1000, {"BasePath": base_path, "Dat
 dbutils.notebook.run("./03-indicators-gold", 1000, {"BasePath": base_path, "DatabaseName": database_name})
 
 # COMMAND ----------
+
 
